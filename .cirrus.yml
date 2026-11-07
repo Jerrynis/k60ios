@@ -1,0 +1,30 @@
+# Cirrus CI: build the K60 Data seed on macOS 13 (Ventura).
+#
+# Sign in at https://cirrus-ci.com with GitHub, enable this repository, then
+# press "Run" on the task. The seed lands as an artifact (2 GiB raw APFS).
+#
+# iOS 16.6.1 rejects APFS containers written by macOS 15/26/27; Ventura's format
+# is the one it mounts.
+
+task:
+  name: k60-data-seed
+  macos_instance:
+    image: ghcr.io/cirruslabs/macos-ventura-base:latest
+  timeout_in: 60m
+  script:
+    - sw_vers
+    - diskutil apfs list || true
+    - |
+      set -eux
+      hdiutil create -size 2048m -layout NONE -fs APFS -volname OwnerData -type UDTO seed.dmg
+      ls -l seed.dmg
+      xxd -l 64 seed.dmg
+      shasum -a 256 seed.dmg
+    - |
+      set -eux
+      DEV=$(hdiutil attach -nomount seed.dmg | awk '/^\/dev\/disk/ {print $1; exit}')
+      diskutil apfs list
+      hdiutil detach "$DEV" || true
+  seed_artifact:
+    path: seed.dmg
+    type: application/octet-stream
