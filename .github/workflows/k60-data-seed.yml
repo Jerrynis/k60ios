@@ -1,0 +1,82 @@
+name: k60-data-seed
+
+# Build a Data seed on an older macOS runner.
+#
+# iOS 16.6.1 rejects APFS containers written by modern macOS (mount → EFTYPE/79),
+# so this runs on macos-13 (Ventura). It creates a raw APFS container of the
+# requested size with a volume named "Data", then uploads the raw bytes.
+
+on:
+  workflow_dispatch:
+    inputs:
+      size_mib:
+        description: 'Container size in MiB (phone window is 2049 MiB)'
+        default: '2048'
+      volume_name:
+        description: 'APFS volume name'
+        default: 'Data'
+      with_gpt:
+        description: 'Also emit a GPT-wrapped variant (1 = yes)'
+        default: '1'
+
+jobs:
+  seed:
+    runs-on: macos-13
+    timeout-minutes: 30
+    steps:
+      - name: Environment
+        run: |
+          sw_vers
+          newfs_apfs -h 2>&1 | head -25 || true
+          diskutil apfs 2>&1 | head -20 || true
+
+      - name: Build raw APFS container
+        env:
+          SIZE_MIB: ${{ inputs.size_mib }}
+          VOLNAME: ${{ inputs.volume_name }}
+        run: |
+          set -euxo pipefail
+          W="$RUNNER_TEMP/seed"; mkdir -p "$W"; cd "$W"
+          mkfile -n "${SIZE_MIB}m" raw.img
+          ls -l raw.img
+
+          # attach as a raw block device
+          hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount raw.img | tee attach.txt
+          DEV=$(awk '/^\/dev\/disk/ {print $1; exit}' attach.txt)
+          echo "DEV=$DEV"
+          diskutil list "$DEV" || true
+
+          # create the container and a Data volume on it
+          diskutil apfs createContainer "$DEV" || true
+          diskutil apfs addVolume "$DEV" APFS "$VOLNAME" || true
+          diskutil apfs list || true
+
+          hdiutil detach "$DEV" || true
+          xxd -l 64 raw.img
+          shasum -a 256 raw.img | tee raw.sha256
+
+      - name: Emit GPT variant
+        if: ${{ inputs.with_gpt == '1' }}
+        env:
+          SIZE_MIB: ${{ inputs.size_mib }}
+        run: |
+          set -euxo pipefail
+          W="$RUNNER_TEMP/seed"; cd "$W"
+          # 1 MiB of zeros in front: the phone layout puts the container at +1 MiB
+          dd if=/dev/zero of=zeros.img bs=1m count=1
+          cat zeros.img raw.img > gpt-variant.img
+          # wrap with a real GPT so the driver's signature check passes
+          hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount gpt-variant.img || true
+          ls -l gpt-variant.img
+          shasum -a 256 gpt-variant.img | tee gpt-variant.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: k60-data-seed
+          path: |
+            ${{ runner.temp }}/seed/raw.img
+            ${{ runner.temp }}/seed/*.sha256
+            ${{ runner.temp }}/seed/gpt-variant.img
+          if-no-files-found: warn
+          retention-days: 7
